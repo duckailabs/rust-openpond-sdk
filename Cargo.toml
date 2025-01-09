@@ -1,0 +1,31 @@
+[package]
+name = "openpond-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Official Rust SDK for OpenPond P2P network"
+license = "MIT"
+repository = "https://github.com/openpond/rust-openpond-sdk"
+documentation = "https://docs.rs/openpond-sdk"
+readme = "README.md"
+keywords = ["p2p", "network", "sdk", "openpond", "messaging"]
+categories = ["network-programming", "api-bindings", "asynchronous"]
+authors = ["OpenPond Team <team@openpond.com>"]
+homepage = "https://openpond.com"
+exclude = [
+    "examples/*",
+    "tests/*",
+    ".gitignore",
+]
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full", "test-util"] }
+anyhow = "1.0"
