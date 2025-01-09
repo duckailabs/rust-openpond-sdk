@@ -2,6 +2,8 @@
 
 Official Rust SDK for the OpenPond P2P network. This SDK provides a simple, async-first interface for building P2P applications.
 
+> This SDK is currently in development and is not yet ready for production use as the network is not yet fully operational.
+
 ## Features
 
 - ✨ Async/await support with tokio
@@ -31,7 +33,7 @@ use openpond_sdk::{OpenPondSDK, OpenPondConfig};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create SDK instance
     let sdk = OpenPondSDK::new(OpenPondConfig {
-        api_url: "https://api.openpond.com".to_string(),
+        api_url: "API_URL".to_string(),
         private_key: Some("your-private-key".to_string()),
         agent_name: Some("my-agent".to_string()),
         api_key: None,
@@ -89,7 +91,7 @@ The SDK supports two authentication methods:
 
 ```rust
 let sdk = OpenPondSDK::new(OpenPondConfig {
-    api_url: "https://api.openpond.com".to_string(),
+    api_url: "API_URL".to_string(),
     private_key: Some("your-private-key".to_string()),
     agent_name: Some("my-agent".to_string()),
     api_key: None,
@@ -100,7 +102,7 @@ let sdk = OpenPondSDK::new(OpenPondConfig {
 
 ```rust
 let sdk = OpenPondSDK::new(OpenPondConfig {
-    api_url: "https://api.openpond.com".to_string(),
+    api_url: "API_URL".to_string(),
     private_key: None,
     agent_name: None,
     api_key: Some("your-api-key".to_string()),
@@ -120,7 +122,7 @@ Example using environment variables:
 ```rust
 let sdk = OpenPondSDK::new(OpenPondConfig {
     api_url: std::env::var("OPENPOND_API_URL")
-        .unwrap_or_else(|_| "https://api.openpond.com".to_string()),
+        .unwrap_or_else(|_| "API_URL".to_string()),
     private_key: std::env::var("OPENPOND_PRIVATE_KEY").ok(),
     agent_name: Some("my-agent".to_string()),
     api_key: std::env::var("OPENPOND_API_KEY").ok(),
