@@ -3,7 +3,7 @@ mod types;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use eventsource_client::{Client as EventSourceClient, SSE};
 
 pub use error::{OpenPondError, Result};
 pub use types::*;
@@ -19,9 +19,9 @@ pub use types::*;
 pub struct OpenPondSDK {
     client: reqwest::Client,
     config: OpenPondConfig,
-    last_message_timestamp: Arc<Mutex<i64>>,
     message_callback: Arc<Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>>,
     error_callback: Arc<Mutex<Option<Box<dyn Fn(OpenPondError) + Send + Sync>>>>,
+    sse_client: Arc<Mutex<Option<EventSourceClient>>>,
 }
 
 impl OpenPondSDK {
@@ -48,9 +48,9 @@ impl OpenPondSDK {
         Self {
             client,
             config,
-            last_message_timestamp: Arc::new(Mutex::new(0)),
             message_callback: Arc::new(Mutex::new(None)),
             error_callback: Arc::new(Mutex::new(None)),
+            sse_client: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,13 +72,55 @@ impl OpenPondSDK {
         *cb = Some(Box::new(callback));
     }
 
-    /// Starts the SDK and begins listening for messages
+    /// Starts the SDK and begins listening for messages using SSE
     pub async fn start(&self) -> Result<()> {
         // Register the agent if not already registered
         self.register_agent().await?;
 
-        // Start polling for new messages
-        self.start_polling();
+        // Setup SSE client
+        let url = format!("{}/messages/stream", self.config.api_url);
+        let mut client = EventSourceClient::new(url)?;
+
+        // Store the client for later use (e.g., cleanup)
+        {
+            let mut sse = self.sse_client.lock().await;
+            *sse = Some(client.clone());
+        }
+
+        // Clone the callbacks for the async task
+        let message_callback = self.message_callback.clone();
+        let error_callback = self.error_callback.clone();
+
+        // Start listening for events in a separate task
+        tokio::spawn(async move {
+            while let Ok(event) = client.next().await {
+                match event {
+                    SSE::Event(event) => {
+                        if let Ok(msg) = serde_json::from_str::<Message>(&event.data) {
+                            if let Some(cb) = message_callback.lock().await.as_ref() {
+                                cb(msg);
+                            }
+                        }
+                    }
+                    SSE::Error(error) => {
+                        if let Some(cb) = error_callback.lock().await.as_ref() {
+                            cb(OpenPondError::NetworkError(error.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Stops the SDK and cleans up resources
+    pub async fn stop(&self) -> Result<()> {
+        let mut sse = self.sse_client.lock().await;
+        if let Some(client) = sse.take() {
+            client.close();
+        }
         Ok(())
     }
 
@@ -165,83 +207,5 @@ impl OpenPondSDK {
         }
 
         Ok(())
-    }
-
-    fn start_polling(&self) {
-        let client = self.client.clone();
-        let last_timestamp = Arc::clone(&self.last_message_timestamp);
-        let message_callback = Arc::clone(&self.message_callback);
-        let error_callback = Arc::clone(&self.error_callback);
-        let api_url = self.config.api_url.clone();
-        let private_key = self.config.private_key.clone();
-
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(5));
-
-            loop {
-                interval.tick().await;
-                let since = {
-                    let timestamp = last_timestamp.lock().await;
-                    *timestamp
-                };
-
-                let response = client
-                    .get(&format!("{}/messages", api_url))
-                    .query(&[
-                        ("privateKey", private_key.as_deref().unwrap_or("")),
-                        ("since", &since.to_string()),
-                    ])
-                    .send()
-                    .await;
-
-                match response {
-                    Ok(response) => {
-                        if !response.status().is_success() {
-                            if let Some(cb) = error_callback.lock().await.as_ref() {
-                                cb(OpenPondError::ApiError {
-                                    status: response.status().as_u16(),
-                                    message: response.text().await.unwrap_or_default(),
-                                });
-                            }
-                            continue;
-                        }
-
-                        match response.text().await {
-                            Ok(text) => {
-                                match serde_json::from_str::<serde_json::Value>(&text) {
-                                    Ok(data) => {
-                                        if let Ok(messages) = serde_json::from_value::<Vec<Message>>(data["messages"].clone()) {
-                                            let mut max_timestamp = since;
-                                            if let Some(cb) = message_callback.lock().await.as_ref() {
-                                                for message in messages {
-                                                    max_timestamp = std::cmp::max(max_timestamp, message.timestamp);
-                                                    cb(message);
-                                                }
-                                            }
-                                            *last_timestamp.lock().await = max_timestamp;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let Some(cb) = error_callback.lock().await.as_ref() {
-                                            cb(OpenPondError::SerializationError(e));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(cb) = error_callback.lock().await.as_ref() {
-                                    cb(OpenPondError::NetworkError(e.to_string()));
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(cb) = error_callback.lock().await.as_ref() {
-                            cb(OpenPondError::NetworkError(e.to_string()));
-                        }
-                    }
-                }
-            }
-        });
     }
 }
