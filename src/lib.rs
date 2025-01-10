@@ -3,7 +3,8 @@ mod types;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use eventsource_client::{Client as EventSourceClient, SSE};
+use eventsource_client::{Client, SSE, ClientBuilder};
+use futures::StreamExt;
 
 pub use error::{OpenPondError, Result};
 pub use types::*;
@@ -21,7 +22,6 @@ pub struct OpenPondSDK {
     config: OpenPondConfig,
     message_callback: Arc<Mutex<Option<Box<dyn Fn(Message) + Send + Sync>>>>,
     error_callback: Arc<Mutex<Option<Box<dyn Fn(OpenPondError) + Send + Sync>>>>,
-    sse_client: Arc<Mutex<Option<EventSourceClient>>>,
 }
 
 impl OpenPondSDK {
@@ -50,7 +50,6 @@ impl OpenPondSDK {
             config,
             message_callback: Arc::new(Mutex::new(None)),
             error_callback: Arc::new(Mutex::new(None)),
-            sse_client: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -79,35 +78,66 @@ impl OpenPondSDK {
 
         // Setup SSE client
         let url = format!("{}/messages/stream", self.config.api_url);
-        let mut client = EventSourceClient::new(url)?;
+        let mut builder = ClientBuilder::for_url(&url).map_err(|_| OpenPondError::SSEError)?;
+        
+        // Add required headers
+        builder = builder
+            .header("Accept", "text/event-stream")
+            .map_err(|_| OpenPondError::SSEError)?;
 
-        // Store the client for later use (e.g., cleanup)
-        {
-            let mut sse = self.sse_client.lock().await;
-            *sse = Some(client.clone());
+        // Add authentication headers
+        if let Some(private_key) = &self.config.private_key {
+            let timestamp = chrono::Utc::now().timestamp_millis().to_string();
+            let message = format!("Authenticate to OpenPond API at timestamp {}", timestamp);
+            
+            builder = builder
+                .header("X-Agent-Id", private_key)
+                .map_err(|_| OpenPondError::SSEError)?
+                .header("X-Timestamp", &timestamp)
+                .map_err(|_| OpenPondError::SSEError)?;
+                
+            // TODO: Add signature header once we implement signing
+            // .header("X-Signature", signature)
+        }
+        
+        if let Some(api_key) = &self.config.api_key {
+            builder = builder
+                .header("X-API-Key", api_key)
+                .map_err(|_| OpenPondError::SSEError)?;
         }
 
         // Clone the callbacks for the async task
         let message_callback = self.message_callback.clone();
         let error_callback = self.error_callback.clone();
+        let agent_id = self.config.private_key.clone();
 
         // Start listening for events in a separate task
         tokio::spawn(async move {
-            while let Ok(event) = client.next().await {
+            let client = builder.build();
+            let mut stream = client.stream();
+
+            while let Some(event) = stream.next().await {
                 match event {
-                    SSE::Event(event) => {
+                    Ok(SSE::Event(event)) => {
                         if let Ok(msg) = serde_json::from_str::<Message>(&event.data) {
-                            if let Some(cb) = message_callback.lock().await.as_ref() {
-                                cb(msg);
+                            // Only process messages intended for us
+                            if let Some(ref our_id) = agent_id {
+                                if msg.to_agent_id == *our_id {
+                                    if let Some(cb) = message_callback.lock().await.as_ref() {
+                                        cb(msg);
+                                    }
+                                }
                             }
                         }
                     }
-                    SSE::Error(error) => {
+                    Err(e) => {
                         if let Some(cb) = error_callback.lock().await.as_ref() {
-                            cb(OpenPondError::NetworkError(error.to_string()));
+                            cb(OpenPondError::from(e));
                         }
+                        // Wait a bit before reconnecting on error
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
-                    _ => {}
+                    _ => {} // Ignore other event types
                 }
             }
         });
@@ -117,10 +147,7 @@ impl OpenPondSDK {
 
     /// Stops the SDK and cleans up resources
     pub async fn stop(&self) -> Result<()> {
-        let mut sse = self.sse_client.lock().await;
-        if let Some(client) = sse.take() {
-            client.close();
-        }
+        // Nothing to clean up since the stream will be dropped when the task ends
         Ok(())
     }
 
